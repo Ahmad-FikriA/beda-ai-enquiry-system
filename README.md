@@ -142,7 +142,7 @@ def process_enquiry_pipeline(raw_payload: Dict[str, Any]) -> PipelineState:
         state.drafted_response = draft_support_reply(rag_info)
 
     # 5. Human Approval Gate (Side-effects explicitly blocked until human approves)
-    send_to_approval_queue(state, proposed_action="UPDATE_CRM_AND_SEND_REPLY")
+    send_to_approval_queue(state, proposed_action="UPDATE_CRM_AND_SEPARATE_SEND_REPLY")
     return state
 ```
 
