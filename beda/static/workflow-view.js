@@ -9,7 +9,7 @@
   function folderRows(rows,enquiries,folder){
     const saved=new Map(enquiries.map(e=>[e.id,e]));
     return rows.map(row=>({...row,status:saved.get(row.id)?.status||'READY'}))
-      .filter(row=>(row.status==='JUNK')===(folder==='junk'));
+      .filter(row=>folder==='review'?row.status==='NEEDS_HUMAN_REVIEW':(row.status==='JUNK')===(folder==='junk'));
   }
   const api={eventStage,folderRows};
   if(typeof module!=='undefined'&&module.exports)module.exports=api;

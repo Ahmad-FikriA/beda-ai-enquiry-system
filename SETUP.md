@@ -2,6 +2,33 @@
 
 This guide is for someone reviewing the internship demonstration. You do not need to understand programming or JSON to inspect the results. Initial setup uses a terminal: an application where you paste and run commands.
 
+## Model outage verification
+
+Use a separate database filename to preserve your existing demonstration. In `.env`, set `BEDA_MODEL_OFFLINE=1`, then start:
+
+```sh
+uv run --env-file .env python main.py serve --db beda-outage-demo.db --port 8020
+```
+
+Open `http://127.0.0.1:8020`. This switch deliberately prevents Gemini requests; no valid API key is needed for the outage test.
+
+1. Submit an enquiry. It is saved first, then appears as **NEEDS HUMAN REVIEW** when model interpretation is unavailable.
+2. Submit another fictional enquiry using a different ID. Intake still works; it goes directly to human review without more model calls. Resubmitting identical input with the same ID does not create duplicate work; conflicting content is rejected.
+3. Open **Human review**, then **Alert human / retry**. Inspect the original source through the Input node. You can record a meaningful manual review note without using the model. This does not send a reply or update CRM.
+4. For an item not manually closed, stop the server with Ctrl+C. Set `BEDA_MODEL_OFFLINE=0`, configure a working Gemini key, and restart with the **same database**. Saved items and the outage pause remain.
+5. Select **Retry saved work**. This is a deliberate recovery probe, not a new enquiry. On success, inspect the new run version and approve only if appropriate. If the provider is still unavailable, it returns to human review. Other diverted items are not automatically replayed.
+
+Transient provider failures already receive at most three attempts per model operation, with 2- and 4-second backoff and a 35-second timeout per request. Authentication failures stop immediately. After those attempts are exhausted, the saved queue prevents an endless retry loop. Changing environment settings requires a server restart.
+
+Developer checks (temporary databases, fake model responses, no paid API calls):
+
+```sh
+uv run python -m unittest discover -s tests -q
+node --test tests/*.test.cjs
+```
+
+Keep database files private: they contain source messages, queue snapshots and audit history. This is not a multi-worker service or a production authentication system.
+
 The app accepts the supplied enquiries or a fictional message you enter, uses Gemini to analyse it, and lets you inspect the recommendation, supporting information and response draft. The workflow diagram shows the steps that actually ran.
 
 > This is a local assessment prototype, not a connected email or CRM service. Use fictional data only. Gemini receives the information needed for model processing. No customer messages are sent, and external CRM records are not changed. Junk is recoverable, never permanently deleted by this app.
@@ -207,7 +234,7 @@ For a backup, stop the server before copying the database file. Do not delete or
 | Results look unchanged after editing a document or updating code | Restart the server after code changes, refresh the page, then choose **New full run**. Old results are intentionally preserved. |
 | Approve / Restore reports an old version | Select **Latest** in Run history, refresh, and review the current result. Historical versions cannot be acted on. |
 | An enquiry is missing from Inbox | Check **Junk**. If misclassified, use **Not junk / Restore to Inbox**. |
-| Another action is running | Wait for the current action to finish. This local demo processes one write operation at a time. |
+| Another action is running | Retry shortly with the same message reference. Intake and review writes are briefly serialized; model processing runs separately. |
 
 If asking for help, share the enquiry reference, stage and error text—not your API key or `.env` contents.
 

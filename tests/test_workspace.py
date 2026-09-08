@@ -9,6 +9,8 @@ from urllib.error import HTTPError
 from beda.workspace import Handler
 from beda.storage import Database
 from beda.live import LiveService
+from beda.work_queue import WorkQueue
+import time
 from tests.test_live import FakeModel
 
 class WorkspaceTests(unittest.TestCase):
@@ -18,13 +20,26 @@ class WorkspaceTests(unittest.TestCase):
         self.server.write_lock=threading.Lock()
         self.server.db=Database(str(Path(self.tmp.name)/'test.db'));self.server.db.initialize()
         self.server.service=LiveService(self.server.db,FakeModel())
+        self.server.queue=WorkQueue(self.server.service)
+        self.server.queue.start()
         self.url=f'http://127.0.0.1:{self.server.server_port}'
         self.thread=threading.Thread(target=self.server.serve_forever,daemon=True);self.thread.start()
     def tearDown(self):
+        self.server.queue.stop()
         self.server.shutdown();self.server.server_close();self.thread.join();self.tmp.cleanup()
-    def post(self,path,data,origin):
+    def post(self,path,data,origin,wait=True):
         request=Request(self.url+path,data=json.dumps(data).encode(),headers={'Content-Type':'application/json','Origin':origin,'X-BEDA-Workspace':'1'})
-        with urlopen(request) as response:return json.load(response)
+        with urlopen(request) as response:
+            result=json.load(response)
+        if wait and path in ('/api/process','/api/rerun','/api/queue/retry'):
+            deadline=time.monotonic()+5
+            while time.monotonic()<deadline:
+                eq=self.server.queue.enquiry(result['id'])
+                if eq.status not in ('QUEUED','PROCESSING'):
+                    return {'id':eq.id,'status':eq.status}
+                time.sleep(.01)
+            self.fail('Worker did not finish in time')
+        return result
     def test_cross_origin_rejected_and_same_origin_review_persists(self):
         payload={'id':'custom','body':'Call 0400 123 456 for solar'}
         with self.assertRaises(HTTPError) as error:self.post('/api/process',payload,'https://untrusted.test')
@@ -38,7 +53,7 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(HTTPError) as error:self.post('/api/decide',{'id':'custom','approve':True,'version':1},self.url)
         error.exception.close()
 
-    def test_progress_readable_during_model_call_and_second_write_rejected(self):
+    def test_progress_readable_during_model_call_and_second_intake_accepted(self):
         from concurrent.futures import ThreadPoolExecutor
         entered,release=threading.Event(),threading.Event()
         original=self.server.service.model.generate
@@ -55,9 +70,8 @@ class WorkspaceTests(unittest.TestCase):
                     progress=json.load(response)
                 self.assertIn('STAGE_STARTED',[e['event_type'] for e in progress['audit']])
                 self.assertNotIn('APPROVAL_REQUESTED',[e['event_type'] for e in progress['audit']])
-                with self.assertRaises(HTTPError) as error:
-                    self.post('/api/process',{'id':'other'},self.url)
-                self.assertEqual(error.exception.code,409);error.exception.close()
+                result=self.post('/api/process',{'id':'other'},self.url,wait=False)
+                self.assertEqual(result['status'],'QUEUED')
             finally:
                 release.set()
             self.assertEqual(pending.result()['status'],'PENDING_APPROVAL')
@@ -79,6 +93,37 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(current['version'],2)
         self.assertEqual(current['enquiry']['status'],'PENDING_APPROVAL')
 
+    def test_offline_http_review_and_retry_are_durable_and_origin_protected(self):
+        from unittest.mock import patch
+        from beda.llm import ModelError
+        with patch.object(self.server.service.model,'generate',side_effect=ModelError('Offline')) as model:
+            result=self.post('/api/process',{'id':'offline','body':'Solar question'},self.url)
+            self.assertEqual(result['status'],'NEEDS_HUMAN_REVIEW')
+            self.post('/api/process',{'id':'offline-two','body':'Another question'},self.url)
+            self.assertEqual(model.call_count,1)
+        with urlopen(self.url+'/api/run/offline-two') as response:
+            saved=json.load(response)
+        self.assertEqual(saved['enquiry']['body'],'Another question')
+        self.assertIsNone(saved['enquiry']['proposal'])
+        self.assertTrue(any(a['event_type']=='QUEUE_HUMAN_REVIEW' for a in saved['audit']))
+        for path,data in [('/api/queue/retry',{'id':'offline'}),('/api/queue/review',{'id':'offline','note':'Review'})]:
+            with self.assertRaises(HTTPError) as error:self.post(path,data,'https://untrusted.test')
+            self.assertEqual(error.exception.code,403);error.exception.close()
+        result=self.post('/api/queue/retry',{'id':'offline'},self.url)
+        self.assertEqual(result['status'],'PENDING_APPROVAL')
+        self.assertEqual(len(self.server.db.list_actions_for_enquiry('offline')),1)
+        self.post('/api/queue/review',{'id':'offline-two','note':'Read source; manual follow-up needed'},self.url)
+        self.assertEqual(self.server.queue.enquiry('offline-two').status,'HUMAN_REVIEWED')
+
+    def test_queued_rerun_blocks_old_approval_before_worker_claim(self):
+        self.post('/api/process',{'id':'blocked','body':'Solar'},self.url)
+        self.server.queue.stop()
+        self.post('/api/rerun',{'id':'blocked','mode':'full','request_id':'queued-rerun-001'},self.url,wait=False)
+        with self.assertRaises(HTTPError) as error:
+            self.post('/api/decide',{'id':'blocked','approve':True,'version':1},self.url)
+        self.assertEqual(error.exception.code,400);error.exception.close()
+        self.assertEqual(self.server.db.list_actions_for_enquiry('blocked')[0].status,'PENDING_APPROVAL')
+
     def test_document_page_api_and_reviewed_update(self):
         with urlopen(self.url+'/documents') as response:
             self.assertIn(b'Document history',response.read())
@@ -95,7 +140,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_junk_restore_endpoint_rejects_cross_origin_and_stale_version(self):
         from tests.test_junk import JunkModel
-        self.server.service=LiveService(self.server.db,JunkModel())
+        self.server.service.model=JunkModel()
         result=self.post('/api/process',{'id':'api-junk','body':'Buy bulk leads'},self.url)
         self.assertEqual(result['status'],'JUNK')
         for origin,version,code in [('https://other.test',1,403),(self.url,99,400),(self.url,None,400)]:

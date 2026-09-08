@@ -40,10 +40,13 @@ class Gemini:
     def __init__(self):
         self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self.key = os.getenv("GEMINI_API_KEY", "")
+        self.offline = os.getenv("BEDA_MODEL_OFFLINE", "0") == "1"
         if not re.fullmatch(r"[a-zA-Z0-9.-]+", self.model):
             raise ModelError("Invalid GEMINI_MODEL identifier")
 
     def generate(self, instruction, data, schema, log):
+        if self.offline:
+            raise ModelError("Model outage simulation enabled (BEDA_MODEL_OFFLINE=1). No provider request sent.")
         stage = "extract" if schema is Analysis else "expert" if schema.__name__ in ("ResearchPlan", "ResearchAnswer") else "draft"
         original_log = log
         log = lambda event, details: original_log(event, {**details, "stage": stage})
