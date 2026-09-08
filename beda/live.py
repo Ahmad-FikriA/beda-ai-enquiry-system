@@ -154,6 +154,8 @@ class LiveService:
             self.event(eq, "RESEARCH_CHECKED", {"needed": should_research,
                 "status": "RESEARCH_REQUIRED" if should_research else "SKIPPED_MISSING_INFORMATION" if proposal.missing_fields else "NOT_NEEDED"})
             findings=research(self.model,eq,log) if should_research else None
+            if findings and findings['status']=='FAILED':
+                raise ModelError('Research model unavailable; source and validated facts retained for human review.')
             if findings and (findings['status']!='EVIDENCE_FOUND' or analysis.category=='technical'):
                 eq.recommendation.action='ESCALATE_TO_EXPERT'
                 self.event(eq,'RESEARCH_ESCALATED',{'stage':'expert','reason':'Unresolved evidence or technical sign-off requires a human.'})

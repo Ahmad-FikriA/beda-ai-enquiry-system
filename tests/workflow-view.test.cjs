@@ -25,3 +25,8 @@ test('clarification draft events map only to the branch actually executed',()=>{
   assert.equal(view.eventStage(event,[{event_type:'STAGE_STARTED',details:{stage:'clarify'}}]),'clarify');
   assert.equal(view.eventStage(event,[]),'draft');
 });
+const reviewView = require('../beda/static/workflow-view.js');
+require('node:test')('Human review filter contains only interpretation fallbacks',()=>{
+  require('node:assert/strict').deepEqual(reviewView.folderRows([{id:'a'},{id:'b'}],
+    [{id:'a',status:'NEEDS_HUMAN_REVIEW'},{id:'b',status:'QUEUED'}],'review').map(row=>row.id),['a']);
+});

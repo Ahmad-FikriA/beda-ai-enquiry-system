@@ -4,6 +4,18 @@ A local workflow canvas following the Test 1 architecture. **Gemini proposes. De
 
 ## Start here — for reviewers
 
+### Test 2 version and outage verification
+
+The Test 2 baseline for this verification is commit `0e269824358b0c13efb804b59832a9bc3d367d86` (the public `main` checked on 8 September 2026). This build uses the supplied `data/enquiries.csv`, `data/crm.csv`, staff/routing data and three source documents; the original Test 1 proposal is preserved separately in [Test 1.md](Test%201.md).
+
+The focused follow-up adds **durable intake → bounded model processing → human fallback → explicit retry**. Inputs are validated, normalized and committed to SQLite before the server acknowledges them. A single background worker makes model calls, so another enquiry can be accepted during API delays. Identical source deliveries reuse saved work; conflicting content under an existing ID is rejected.
+
+After a terminal interpretation failure, model processing pauses persistently. Failed, waiting and newly accepted items appear under **Human review**, with original source, audit history, retry and manual-review controls. No replacement model guesses an answer. Retry reuses the saved work item and creates a versioned processing attempt; repeated clicks do not add jobs. A successful retry reopens processing for new inputs; other diverted items remain for explicit human review. Research-model failures also stop before drafting or approval.
+
+Restart recovery preserves queued work and routes interrupted work to human review. If a pipeline result was already saved before its queue acknowledgement, recovery reconciles it without rerunning or creating another local action. Approvals are blocked while queue work is outstanding.
+
+See [the reproducible outage walkthrough](SETUP.md#model-outage-verification). This remains a single-process, local prototype: run only one server per database. SQLite/disk failure cannot be acknowledged as successful intake; callers must retry unacknowledged requests with the same ID. Queue payloads contain sensitive source data, so protect the database; legacy raw-content cleanup does not purge queue snapshots. No external email or CRM action is implemented.
+
 Follow the [Setup & User Guide](SETUP.md) for first-time installation, Gemini key setup, a demonstration walkthrough, troubleshooting and starting a clean session. No knowledge of JSON is needed to use the interface.
 
 This prototype processes the supplied examples and messages you enter manually. It does **not** connect to a real mailbox, website form, messaging account or external CRM. The guide explains exactly which actions are real and which are local demonstrations.

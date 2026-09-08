@@ -10,6 +10,7 @@ from urllib.parse import urlparse, parse_qs
 from beda.storage import Database
 from beda.models import CRMRecord
 from beda.live import LiveService
+from beda.work_queue import WorkQueue
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "beda" / "static"
@@ -49,13 +50,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/workspace":
-            self.respond(200, {"fixtures": fixtures(), "enquiries": [e.model_dump() for e in self.server.db.list_enquiries()],
+            ids = dict.fromkeys([e.id for e in self.server.db.list_enquiries()] + [j['enquiry_id'] for j in self.server.queue.items()])
+            self.respond(200, {"fixtures": fixtures(), "enquiries": [self.server.queue.enquiry(eid).model_dump() for eid in ids],
+                'queue': self.server.queue.health(),
                 "model": self.server.service.model.model, "configured": bool(self.server.service.model.key)})
         elif path == '/api/documents':
             self.respond(200,{'documents':self.server.service.documents.list()})
         elif path.startswith("/api/run/"):
             eid = path.removeprefix("/api/run/")
-            eq = self.server.db.get_enquiry(eid)
+            eq = self.server.queue.enquiry(eid)
+            job = self.server.queue.latest(eid)
             current=self.server.service.runs.current(eid)
             try:
                 version=int(parse_qs(urlparse(self.path).query).get('version',[current])[0])
@@ -63,8 +67,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(400,{'error':'Invalid version'});return
             saved=self.server.service.runs.snapshot(eid,version) if version!=current else (eq.model_dump() if eq else None)
             self.respond(200, {"enquiry": saved, 'version':version,'current_version':current,
+                'work_item': {k:v for k,v in job.items() if k!='payload_json'} if job and version==current else None,
                 'versions':self.server.service.runs.list(eid),
-                "audit": [a.model_dump() for a in self.server.db.list_audit(eid) if a.details.get('run_version',1)==(version or 1)],
+                "audit": [a.model_dump() for a in self.server.db.list_audit(eid) if
+                    (a.details.get('run_version')==(version or 1)) or
+                    (version==current and job and a.details.get('queue_job_id')==job['id'])],
                 "actions": [a.model_dump() for a in self.server.db.list_actions_for_enquiry(eid) if a.payload.get('run_version',1)==(version or 1)]})
         else:
             file = STATIC / ("index.html" if path == "/" else 'documents.html' if path == '/documents' else path.removeprefix("/static/"))
@@ -105,18 +112,22 @@ class Handler(BaseHTTPRequestHandler):
                     filename = row.get("attachment")
                     if filename:
                         payload=self.server.service.documents.attach(payload)
-                result = self.server.service.process_input(payload)
-                self.respond(200, {"id": result.id, "status": result.status})
+                self.respond(202, self.server.queue.submit(payload))
             elif self.path == '/api/rerun':
-                result=self.server.service.rerun(payload['id'],payload['mode'],payload['request_id'])
-                self.respond(200,{'id':result.id,'status':result.status})
+                self.respond(202, self.server.queue.submit({'id':payload['id']},payload['mode'],payload['request_id']))
+            elif self.path == '/api/queue/retry':
+                self.respond(202, self.server.queue.retry(payload['id']))
+            elif self.path == '/api/queue/review':
+                self.respond(200, self.server.queue.review(payload['id'],payload['note']))
             elif self.path == '/api/documents/save':
                 document=self.server.service.documents.save(payload['filename'],payload['content'],payload['note'],payload['revision'])
                 self.respond(200,{'document':document})
             elif self.path == '/api/junk/restore':
+                self.check_queue(payload['id'])
                 result=self.server.service.restore_junk(payload['id'],payload.get('version'))
                 self.respond(200,{'id':result.id,'status':result.status})
             elif self.path == "/api/decide":
+                self.check_queue(payload['id'])
                 if type(payload.get("approve")) is not bool:
                     raise ValueError("approve must be boolean")
                 if type(payload.get('version')) is not int:
@@ -130,6 +141,11 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:
             self.respond(500, {"error": "Processing failed; inspect the saved audit and server configuration."})
 
+    def check_queue(self, eid):
+        job = self.server.queue.latest(eid)
+        if job and job['state'] != 'DONE':
+            raise ValueError('Saved work must complete a new model run before this action can be approved')
+
 
 def serve(path="beda-live.db", port=8000):
     db = Database(path)
@@ -141,8 +157,11 @@ def serve(path="beda-live.db", port=8000):
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.write_lock = Lock()
     server.db, server.service = db, LiveService(db)
+    server.queue = WorkQueue(server.service)
+    server.queue.start()
     print(f"Workflow workspace: http://127.0.0.1:{port} — model: {server.service.model.model}", flush=True)
     try:
         server.serve_forever()
     finally:
+        server.queue.stop()
         server.server_close()

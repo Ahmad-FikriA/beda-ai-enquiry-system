@@ -29,6 +29,7 @@ $('fit').onclick=()=>cy.fit(undefined,45);$('zoom-in').onclick=()=>cy.zoom(cy.zo
 function notice(text){$('notice').textContent=text;$('notice').style.display='block';setTimeout(()=>$('notice').style.display='none',7000)}
 async function api(path,data){const response=await fetch(path,data?{method:'POST',headers:{'Content-Type':'application/json','X-BEDA-Workspace':'1'},body:JSON.stringify(data)}:{});const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed');return result}
 function section(title,value){const wrapper=document.createElement('div');wrapper.innerHTML=InspectorView.renderSection(title,value);$('details').append(wrapper)}
+const reviewNotes=new Map();
 function restoreControl(eq){
  if(snapshot.version!==snapshot.current_version||busy||!(eq.status==='JUNK'||(eq.status==='PENDING_APPROVAL'&&eq.recommendation?.action==='REVIEW_JUNK')))return;
  const button=document.createElement('button');button.className='restore-button';button.textContent='Not junk / Restore to Inbox';
@@ -41,6 +42,23 @@ function inspect(id){const changed=$('stage').value!==id;const wasOpen=!changed&
  if(id==='input'){section('Input',eq?{from:eq.sender,subject:eq.subject,body:eq.body,attachment:eq.attachment_content}:fixture||'No input');return}
  if(id==='audit'){snapshot.audit.forEach(e=>{const d=document.createElement('div');d.className='event';const t=document.createElement('strong');t.textContent=e.event_type;const s=document.createElement('small');s.textContent=e.created_at+' · '+e.actor;d.append(t,s);$('details').append(d)});return}
  if(!eq){section('Waiting','Run this enquiry to inspect its actual output.');return}
+ if(id==='failure'&&snapshot.work_item){
+   section('Saved work',`Attempt ${snapshot.work_item.attempts} · ${eq.status.replaceAll('_',' ')}`);
+   section('Human review',eq.recommendation?.explanation||snapshot.work_item.last_error||'The source is saved. Waiting work does not need another submission.');
+   section('Review owner','Ties Rahardjo · inspect the original message in the Input node. No message or CRM change will be executed here.');
+   if(eq.status==='NEEDS_HUMAN_REVIEW'){
+     const retry=document.createElement('button');retry.textContent='Retry saved work';
+     retry.onclick=()=>run({id:eq.id},'/api/queue/retry');
+     const label=document.createElement('label');label.textContent='Manual review note';
+     const note=document.createElement('textarea');note.rows=4;note.maxLength=2000;note.placeholder='What did you check, and what follow-up is needed?';label.append(note);
+     note.value=reviewNotes.get(eq.id)||'';note.oninput=()=>reviewNotes.set(eq.id,note.value);
+     const reviewed=document.createElement('button');reviewed.textContent='Record manual review';
+     reviewed.onclick=async()=>{reviewed.disabled=true;try{await api('/api/queue/review',{id:eq.id,note:reviewNotes.get(eq.id)||note.value});reviewNotes.delete(eq.id);await refresh()}catch(e){notice(e.message);reviewed.disabled=false}};
+     $('details').append(retry,label,reviewed);
+     section('Retry policy','Fix the provider issue first. One click retries this saved item with bounded API attempts. Other diverted items remain in human review.');
+   }
+   return;
+ }
  if(id==='junk'){
    if(!snapshot.audit.some(e=>e.event_type.startsWith('JUNK_'))){section('Branch','The junk branch was not taken in this run.');return}
    section('Current state',eq.status);section('AI classification reason',eq.proposal?.rationale);
@@ -60,12 +78,12 @@ function inspect(id){const changed=$('stage').value!==id;const wasOpen=!changed&
  else if(events.length)section('Recorded output',events.at(-1).details);else section('State','Not executed or no event recorded for this stage.');
  if(id==='extract'){section('Model calls',snapshot.audit.filter(e=>['LLM_ATTEMPT','LLM_FAILURE','LLM_USAGE'].includes(e.event_type)&&(!e.details.stage||e.details.stage==='extract')).map(e=>e.details))}
 }
-async function refresh(){workspace=await api('/api/workspace');$('model').textContent=workspace.model+' · '+(workspace.configured?'Key configured':'API key needed');$('cases').replaceChildren();
+async function refresh(){workspace=await api('/api/workspace');$('model').textContent=workspace.queue?.paused?'Model paused · enquiries saved for human review':workspace.model+' · '+(workspace.configured?'Key configured':'API key needed');$('cases').replaceChildren();
  const all=[...workspace.fixtures,...workspace.enquiries.filter(e=>!workspace.fixtures.some(f=>f.id===e.id))];
  if(folder===null)folder=workspace.enquiries.find(e=>e.id===selected)?.status==='JUNK'?'junk':'inbox';
  const visible=WorkflowView.folderRows(all,workspace.enquiries,folder);
  if(!visible.some(e=>e.id===selected)){selected=visible[0]?.id||'';viewingVersion=null}
- for(const name of ['inbox','junk']){$('folder-'+name).textContent=(name==='junk'?'Junk':'Inbox')+' · '+WorkflowView.folderRows(all,workspace.enquiries,name).length;$('folder-'+name).setAttribute('aria-pressed',String(folder===name));$('folder-'+name).disabled=busy}
+ for(const name of ['inbox','junk','review']){$('folder-'+name).textContent=({junk:'Junk',inbox:'Inbox',review:'Human review'}[name])+' · '+WorkflowView.folderRows(all,workspace.enquiries,name).length;$('folder-'+name).setAttribute('aria-pressed',String(folder===name));$('folder-'+name).disabled=busy}
  $('folder-help').textContent=folder==='junk'?'Recoverable local copies. Nothing is permanently deleted.':'Suspected junk needing a decision stays here for review.';
  if(!visible.length){const p=document.createElement('p');p.className='muted';p.textContent='No messages in this folder.';$('cases').append(p)}
  for(const row of visible){const b=document.createElement('button');b.className='case'+(row.id===selected?' selected':'');const small=document.createElement('small');small.textContent=row.id+' · '+(row.status==='JUNK'?'In Junk':row.status);const title=document.createElement('span');title.textContent=row.subject;b.append(small,title);b.onclick=async()=>{if(busy)return;selected=row.id;viewingVersion=null;await refresh();if(folder==='junk')inspect('junk')};$('cases').append(b)}
@@ -76,7 +94,7 @@ async function refresh(){workspace=await api('/api/workspace');$('model').textCo
  $('run').textContent=snapshot.enquiry?.status==='MODEL_FAILED'?'↻ Retry enquiry':snapshot.enquiry?'View saved run':'▶ Run enquiry';paintProgress();renderActivity();inspect($('stage').value||'input');}
 async function run(payload,endpoint='/api/process'){
  if(busy)return;
- if(snapshot.enquiry&&snapshot.enquiry.status!=='MODEL_FAILED'&&payload.fixture){inspect('audit');return}
+ if(snapshot.enquiry&&snapshot.enquiry.status!=='MODEL_FAILED'&&payload.fixture){inspect(snapshot.enquiry.status==='NEEDS_HUMAN_REVIEW'?'failure':'audit');return}
  viewingVersion=null;selected=payload.fixture||payload.id;busy=true;$('run').disabled=true;$('new').disabled=true;updateVersions();
  $('status').textContent='Starting…';$('activity-state').textContent='● Live';
  let polling=true;
@@ -89,7 +107,7 @@ async function run(payload,endpoint='/api/process'){
    folder=result.status==='JUNK'?'junk':'inbox';
    if(result.status==='JUNK')notice('Moved to recoverable Junk. No reply or CRM change. Use Not junk / Restore if needed.');
    if(result.status==='PENDING_APPROVAL')notice('Processing finished. Review the recommendation in the human approval node.');
- }catch(e){notice(e.message)}finally{polling=false;busy=false;$('run').disabled=false;$('new').disabled=false;await refresh();if(snapshot.enquiry?.status==='JUNK')inspect('junk')}
+ }catch(e){notice(e.message)}finally{polling=false;busy=false;$('run').disabled=false;$('new').disabled=false;await refresh();if(snapshot.enquiry?.status==='JUNK')inspect('junk');if(snapshot.enquiry?.status==='NEEDS_HUMAN_REVIEW')inspect('failure')}
 }
 $('run').onclick=()=>run({fixture:selected});$('new').onclick=()=>$('compose').showModal();$('cancel').onclick=()=>$('compose').close();$('custom').onsubmit=e=>{e.preventDefault();const payload=Object.fromEntries(new FormData(e.target));$('compose').close();run(payload)};
 const eventCopy={RESEARCH_RETRIEVED:'Approved documents retrieved. Inspect search queries and source excerpts.',RESEARCH_COMPLETED:'Research finished and citations validated.',RESEARCH_ESCALATED:'Evidence gaps or technical sign-off need human review.',RECEIVED:'Input received and saved.',NORMALIZED:'Message normalized for processing.',DEDUPLICATED:'Source ID checked for duplicates.',CLASSIFIED:'Gemini returned a structured classification.',VALIDATED:'Schema and source evidence checked.',CRM_MATCHED:'CRM candidates scored; ambiguity preserved.',ROUTED:'Owner and next action selected by application policy.',INFORMATION_CHECKED:'Checked required and missing information.',RESEARCH_CHECKED:'Checked whether approved research or human expertise is needed.',DRAFTED:'Response draft saved for review.',APPROVAL_REQUESTED:'Paused for your review. No action has been approved.',APPROVED:'You approved the local review action.',REJECTED:'You rejected the action. Execution stopped.',ACTION_STARTED:'Recording the permitted local action.',ACTION_SUCCEEDED:'Local action recorded. No external message sent.',PROMPT_PREVIEW:'Prompt prepared. Select this entry to inspect it.',LLM_USAGE:'Model response received; usage recorded.',IMPORT_WARNING:'Input format needs attention; import assumption recorded.'};
@@ -115,9 +133,10 @@ function paintProgress(){cy.nodes().removeClass('visited waiting running');cy.ed
  let active=null;
  for(const event of snapshot.audit){if(event.event_type==='STAGE_STARTED')active=event.details.stage;
  if(['CLASSIFIED','DRAFTED','RESEARCH_COMPLETED','ESCALATED','APPROVAL_REQUESTED'].includes(event.event_type))active=null}
- if(active&&busy){cy.$id(active).addClass('running');$('status').textContent=stages.find(s=>s[0]===active)[1]+'…'}
+ if(active&&(busy||snapshot.enquiry?.status==='PROCESSING')){cy.$id(active).addClass('running');$('status').textContent=stages.find(s=>s[0]===active)[1]+'…'}
  else $('status').textContent=snapshot.enquiry?.status||'Ready to run';
  if(snapshot.enquiry?.status==='PENDING_APPROVAL')cy.$id('approval').removeClass('visited').addClass('waiting');
+ if(snapshot.enquiry?.status==='NEEDS_HUMAN_REVIEW')cy.$id('failure').removeClass('visited').addClass('waiting');
  for(const edge of cy.edges()){
    if(edge.source().id()==='approval'&&edge.target().id()==='audit'&&!snapshot.audit.some(e=>e.event_type==='REJECTED'))continue;
    if(edge.source().id()==='approval'&&edge.target().id()==='junk'&&!snapshot.audit.some(e=>e.event_type==='JUNK_QUARANTINED'&&e.details.automatic===false))continue;
@@ -136,14 +155,26 @@ function updateVersions(){
  for(const run of snapshot.versions||[]){const option=document.createElement('option');option.value=run.version;option.textContent='v'+run.version+' · '+run.mode;$('version').append(option)}
  $('version').value=viewingVersion||'';
  const historic=snapshot.version!==snapshot.current_version;
+ const outstanding=['QUEUED','RUNNING','NEEDS_HUMAN_REVIEW'].includes(snapshot.work_item?.state);
  $('run').disabled=busy||historic||!selected;
  $('version-note').textContent=historic?'Historical snapshot · read only':snapshot.enquiry?.proposal?.category==='junk'?'Local Junk moves are recoverable':'New versions require new approval';
- $('rerun').disabled=busy||!snapshot.enquiry||historic;
- $('redraft').disabled=busy||!snapshot.enquiry?.proposal||historic||['junk','infrastructure'].includes(snapshot.enquiry?.proposal?.category);
+ $('rerun').disabled=busy||!snapshot.enquiry||historic||outstanding;
+ $('redraft').disabled=busy||!snapshot.enquiry?.proposal||historic||outstanding||['junk','infrastructure'].includes(snapshot.enquiry?.proposal?.category);
  $('version').disabled=busy;
 }
 $('version').onchange=async()=>{viewingVersion=$('version').value?Number($('version').value):null;await refresh()};
 $('rerun').onclick=()=>run({id:selected,mode:'full',request_id:crypto.randomUUID()},'/api/rerun');
 $('redraft').onclick=()=>run({id:selected,mode:'draft',request_id:crypto.randomUUID()},'/api/rerun');
-for(const name of ['inbox','junk'])$('folder-'+name).onclick=async()=>{if(busy)return;folder=name;viewingVersion=null;await refresh();inspect(name==='junk'?'junk':'input')};
+const reviewFolder=document.createElement('button');reviewFolder.id='folder-review';reviewFolder.textContent='Human review';$('folder-inbox').parentElement.append(reviewFolder);
+for(const name of ['inbox','junk','review'])$('folder-'+name).onclick=async()=>{if(busy)return;folder=name;viewingVersion=null;await refresh();inspect(name==='junk'?'junk':name==='review'?'failure':'input')};
 refresh().then(()=>{if(folder==='junk')inspect('junk')}).catch(e=>notice(e.message));
+let refreshingQueue=false;
+setInterval(async()=>{
+ if(busy||refreshingQueue||viewingVersion||!(workspace?.enquiries.some(e=>['QUEUED','PROCESSING'].includes(e.status))||['QUEUED','PROCESSING'].includes(snapshot.enquiry?.status)))return;
+ refreshingQueue=true;
+ try{
+   const previous=snapshot.enquiry?.status;
+   await refresh();
+   if(snapshot.enquiry?.status==='NEEDS_HUMAN_REVIEW'&&previous!=='NEEDS_HUMAN_REVIEW')inspect('failure');
+ }catch(e){$('activity-state').textContent='Reconnecting to saved work…'}finally{refreshingQueue=false}
+},750);
