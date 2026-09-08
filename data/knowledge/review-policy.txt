@@ -1,0 +1,7 @@
+Synthetic demonstration policy — not real BEDA operational guidance. Approved only as prototype process guidance; not a source of engineering specifications, prices or government eligibility rules.
+
+Technical enquiries about battery inverter harmonics, THD limits or a harmonic study require an engineer to review the project specifications and applicable network requirements. This knowledge base contains no approved numeric THD limits. Do not confirm technical compliance from these documents.
+
+For solar or lighting incentive enquiries, collect the site location, relevant bills and equipment details. Government incentive eligibility must be verified against an approved current programme source. This synthetic policy does not establish eligibility for any site.
+
+For invoice and purchase order discrepancies, compare the supplied approved value with the invoiced value on the same tax basis. Record the difference for accounts review. Do not approve payment or modify an invoice automatically.
